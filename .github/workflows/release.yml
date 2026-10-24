@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build + release odux-agent ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile (linux/macOS × amd64/arm64)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA="${GITHUB_SHA::7}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build -trimpath \
+              -ldflags "-s -w \
+                -X github.com/smoolzone/odux-agent/cmd.Version=${VERSION} \
+                -X github.com/smoolzone/odux-agent/cmd.Commit=${SHA} \
+                -X github.com/smoolzone/odux-agent/cmd.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -o "dist/odux_${VERSION}_${os}_${arch}/odux" .
+            tar -C "dist/odux_${VERSION}_${os}_${arch}" -czf "dist/odux_${VERSION}_${os}_${arch}.tar.gz" odux
+            rm -rf "dist/odux_${VERSION}_${os}_${arch}"
+          done
+          (cd dist && sha256sum odux_*.tar.gz | tee SHA256SUMS)
+
+          # Sign the manifest with the release key so installers can verify provenance.
+          if [ -n "${ODUX_SIGNING_KEY:-}" ]; then
+            printf '%s\n' "$ODUX_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+            openssl dgst -sha256 -sign "$RUNNER_TEMP/key.pem" -out dist/SHA256SUMS.sig dist/SHA256SUMS
+            rm -f "$RUNNER_TEMP/key.pem"
+            echo "» signed SHA256SUMS"
+          else
+            echo "::warning::ODUX_SIGNING_KEY not set — publishing an UNSIGNED release"
+          fi
+        env:
+          ODUX_SIGNING_KEY: ${{ secrets.ODUX_SIGNING_KEY }}
+
+      - name: Smoke-test the linux amd64 binary
+        run: |
+          set -euo pipefail
+          cd dist
+          tar -xzf odux_*_linux_amd64.tar.gz -C /tmp odux
+          /tmp/odux version
+          rm -f /tmp/odux
+
+      - name: Write latest
+        run: printf '%s' "${GITHUB_REF_NAME#v}" > dist/latest
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true

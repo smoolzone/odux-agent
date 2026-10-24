@@ -45,8 +45,13 @@ esac
 # --- resolve the version ----------------------------------------------------
 if [ "$VERSION" = "latest" ]; then
   echo "odux installer: resolving the latest release…"
-  # The mirror publishes a plain-text `latest` file; GitHub needs the API.
+  # A mirror serves a plain-text `latest` file; GitHub needs the API (its
+  # `/releases/latest` URL returns HTML). Only accept a value that looks like a version.
   VERSION="$(curl -fsSL "${BASE_URL}/latest" 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+  case "$VERSION" in
+    v[0-9]*|[0-9]*) : ;;
+    *) VERSION="" ;;
+  esac
   if [ -z "$VERSION" ]; then
     VERSION="$(
       curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \

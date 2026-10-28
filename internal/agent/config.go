@@ -4,12 +4,22 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/smoolzone/odux-agent/internal/secret"
+)
+
+// The two ways an agent can run. The mode lives here, in a root-owned file on the chamber:
+// only someone with root on this machine can change it, never the hub.
+const (
+	// ModeFull runs the commands the hub sends (shell, deploy, terminal). The default.
+	ModeFull = "full"
+	// ModeMonitor only reports the machine snapshot; every command from the hub is refused.
+	ModeMonitor = "monitor"
 )
 
 // Config is the on-host agent identity. Key is decrypted into memory only.
@@ -19,6 +29,31 @@ type Config struct {
 	ServerID int    `yaml:"server_id"`
 	KeyEnc   string `yaml:"agent_key_enc,omitempty"`
 	Key      string `yaml:"-"`
+	// Mode is ModeFull or ModeMonitor. Empty (configs written before modes existed) means full.
+	Mode string `yaml:"mode,omitempty"`
+}
+
+// MonitorOnly reports whether this agent refuses every command from the hub.
+func (c *Config) MonitorOnly() bool { return c.Mode == ModeMonitor }
+
+// EffectiveMode is the mode in force: ModeFull unless monitor-only was chosen.
+func (c *Config) EffectiveMode() string {
+	if c.MonitorOnly() {
+		return ModeMonitor
+	}
+	return ModeFull
+}
+
+// ParseMode accepts "full" or "monitor" (also "monitor-only").
+func ParseMode(s string) (string, error) {
+	switch s {
+	case ModeFull:
+		return ModeFull, nil
+	case ModeMonitor, "monitor-only":
+		return ModeMonitor, nil
+	}
+	return "", fmt.Errorf("unknown mode %q: use %q (run what the hub sends) or %q (report stats, run nothing)",
+		s, ModeFull, ModeMonitor)
 }
 
 // HomeDir is where agent state lives: /etc/odux for root, ~/.odux otherwise.

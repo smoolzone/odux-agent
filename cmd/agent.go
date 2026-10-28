@@ -28,7 +28,12 @@ var (
 	flagAgentInterval int
 	flagAgentHostname string
 	flagAgentVersion  string
+	flagAgentMode     string
 )
+
+// monitorRefusal is what the hub is told when a monitor-only agent refuses a command.
+const monitorRefusal = "refused: this chamber's agent runs in monitor-only mode (it reports machine stats and " +
+	"runs nothing). Only someone with root on the chamber can change that: sudo odux agent mode full"
 
 // agentCmd is the outbound connector: it phones home over TLS so the hub never
 // needs inbound access to a client network.
@@ -55,6 +60,17 @@ var agentEnrollCmd = &cobra.Command{
 		}
 		if hub == "" {
 			hub = prompt("Hub URL", "https://app.odux.io")
+		}
+		if err := api.CheckHub(hub); err != nil {
+			return err
+		}
+		mode := cfg.EffectiveMode()
+		if flagAgentMode != "" {
+			m, err := agent.ParseMode(flagAgentMode)
+			if err != nil {
+				return err
+			}
+			mode = m
 		}
 		token := flagAgentToken
 		if token == "" {
@@ -92,11 +108,13 @@ var agentEnrollCmd = &cobra.Command{
 		cfg.AgentID = res.AgentID
 		cfg.ServerID = res.ServerID
 		cfg.Key = res.AgentKey
+		cfg.Mode = mode
 		if err := agent.Save(cfg); err != nil {
 			return err
 		}
 		fmt.Printf("%s enrolled as agent %d for chamber %q (key stored encrypted at %s)\n",
 			emoji(check), res.AgentID, res.ServerName, agent.Path())
+		fmt.Println(describeMode(mode))
 		return nil
 	},
 }
@@ -124,7 +142,14 @@ var agentRunCmd = &cobra.Command{
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
+		fmt.Println(describeMode(cfg.EffectiveMode()))
+
 		beat := func() error {
+			// Re-read the mode every beat, so `odux agent mode` takes effect without a restart.
+			if fresh, err := agent.Load(); err == nil && fresh.Mode != cfg.Mode {
+				cfg.Mode = fresh.Mode
+				fmt.Println(describeMode(cfg.EffectiveMode()))
+			}
 			req := api.HeartbeatRequest{
 				Hostname: hostname,
 				Version:  Version,
@@ -142,11 +167,7 @@ var agentRunCmd = &cobra.Command{
 				fmt.Printf("%s heartbeat ok (chamber %d)%s\n",
 					emoji(check), res.ServerID, pendingHint(res))
 			}
-			for _, c := range res.Commands {
-				if err := handleCommand(cfg.Hub, cfg.Key, c); err != nil {
-					fmt.Fprintf(os.Stderr, "%s command %d: %v\n", emoji(cross), c.ID, err)
-				}
-			}
+			processCommands(cfg, res.Commands)
 			return nil
 		}
 
@@ -217,6 +238,65 @@ var agentUninstallCmd = &cobra.Command{
 		fmt.Printf("%s agent service removed\n", emoji(check))
 		return nil
 	},
+}
+
+var agentModeCmd = &cobra.Command{
+	Use:   "mode [full|monitor]",
+	Short: "Show or set what this agent may do: full (run hub commands) or monitor (stats only)",
+	Long: "full    — run the commands the hub sends (shell, deploy, terminal). The default.\n" +
+		"monitor — only report machine stats; refuse every command from the hub.\n\n" +
+		"The mode is stored on this machine (root-owned), so the hub cannot change it.\n" +
+		"A running agent picks up a change on its next heartbeat; no restart needed.",
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := agent.Load()
+		if err != nil {
+			return err
+		}
+		if len(args) == 0 {
+			fmt.Println(describeMode(cfg.EffectiveMode()))
+			return nil
+		}
+		mode, err := agent.ParseMode(args[0])
+		if err != nil {
+			return err
+		}
+		cfg.Mode = mode
+		if err := agent.Save(cfg); err != nil {
+			return fmt.Errorf("could not save the mode (run as root): %w", err)
+		}
+		fmt.Printf("%s %s\n", emoji(check), describeMode(mode))
+		return nil
+	},
+}
+
+// describeMode is the one-line explanation printed wherever the mode matters.
+func describeMode(mode string) string {
+	if mode == agent.ModeMonitor {
+		return "mode: monitor-only — reports machine stats, refuses every command from the hub"
+	}
+	return "mode: full — runs the commands the hub sends (shell, deploy, terminal)"
+}
+
+// processCommands runs (full mode) or refuses (monitor-only) each command from a heartbeat.
+func processCommands(cfg *agent.Config, cmds []api.HeartbeatCommand) {
+	for _, c := range cmds {
+		var err error
+		if cfg.MonitorOnly() {
+			err = refuseCommand(cfg.Hub, cfg.Key, c)
+		} else {
+			err = handleCommand(cfg.Hub, cfg.Key, c)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s command %d: %v\n", emoji(cross), c.ID, err)
+		}
+	}
+}
+
+// refuseCommand tells the hub a command was not run because this agent is monitor-only.
+func refuseCommand(hub, key string, c api.HeartbeatCommand) error {
+	fmt.Printf("%s refused command %d (%s): monitor-only mode\n", emoji(cross), c.ID, c.Type)
+	return api.ReportCommandResult(hub, key, c.ID, api.CommandResultRequest{Status: "failed", Error: monitorRefusal})
 }
 
 func pendingHint(res *api.HeartbeatResponse) string {
@@ -506,13 +586,14 @@ func runShell(script string) (map[string]any, error) {
 }
 
 func init() {
-	agentCmd.AddCommand(agentEnrollCmd, agentRunCmd, agentInstallCmd, agentUninstallCmd)
+	agentCmd.AddCommand(agentEnrollCmd, agentRunCmd, agentInstallCmd, agentUninstallCmd, agentModeCmd)
 
 	agentEnrollCmd.Flags().StringVar(&flagAgentToken, "token", "", "one-time enrollment token (or ODUX_ENROLL_TOKEN)")
 	agentEnrollCmd.Flags().StringVar(&flagAgentHub, "hub", "", "hub URL (default: stored, then ODUX_HUB)")
 	agentEnrollCmd.Flags().IntVar(&flagAgentServerID, "server-id", 0, "attach to an existing chamber id")
 	agentEnrollCmd.Flags().StringVar(&flagAgentHostname, "hostname", "", "override hostname reported to the hub")
 	agentEnrollCmd.Flags().StringVar(&flagAgentVersion, "version", "", "override agent version")
+	agentEnrollCmd.Flags().StringVar(&flagAgentMode, "mode", "", "full (run hub commands, default) or monitor (stats only)")
 
 	agentRunCmd.Flags().IntVar(&flagAgentInterval, "interval", 5, "heartbeat interval in seconds")
 	agentRunCmd.Flags().StringVar(&flagAgentHostname, "hostname", "", "override hostname reported to the hub")

@@ -23,7 +23,7 @@ func New(cfg *config.Config) *Client {
 	return &Client{
 		Base:  cfg.Hub,
 		Token: cfg.Token,
-		HTTP:  &http.Client{Timeout: 30 * time.Second},
+		HTTP:  httpClient,
 	}
 }
 
@@ -31,8 +31,39 @@ func (c *Client) do(method, path string, body any, out any) error {
 	return request(c.Base, c.Token, method, path, body, out)
 }
 
+// httpClient is shared by every call to the hub. The timeout matters for the agent: without
+// one, a hub that stalls mid-request would hang the heartbeat loop for good and the chamber
+// would look offline until someone restarted the agent.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+// CheckHub refuses a hub address the agent must not talk to. The agent key, command output
+// and terminal sessions travel on this connection, so it has to be TLS: plain http:// is
+// accepted only for a hub on this machine (localhost, 127.0.0.1, ::1), e.g. local development.
+func CheckHub(base string) error {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("invalid hub URL %q: expected https://your-hub", base)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+		return fmt.Errorf("refusing plain http:// hub %s: the agent key and command output would travel unencrypted. "+
+			"Use https:// (plain http is allowed only for a hub on this machine)", base)
+	default:
+		return fmt.Errorf("unsupported hub URL scheme %q in %s: use https://", u.Scheme, base)
+	}
+}
+
 // request performs a JSON request. token == "" sends no Authorization header.
 func request(base, token, method, path string, body any, out any) error {
+	if err := CheckHub(base); err != nil {
+		return err
+	}
 	var rdr io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -48,7 +79,7 @@ func request(base, token, method, path string, body any, out any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach hub %s: %w", base, err)
 	}

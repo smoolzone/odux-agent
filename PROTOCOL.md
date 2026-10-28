@@ -2,7 +2,8 @@
 
 The `odux` agent runs on a chamber (a customer's server) and phones home to the Odux
 hub over HTTPS. It **runs as root** and **opens no inbound port** — every interaction
-is initiated by the agent over an outbound TLS connection.
+is initiated by the agent over an outbound TLS connection. The agent refuses a plain `http://`
+hub address (except `localhost`), and every request times out after 30 seconds.
 
 ## Authentication
 
@@ -140,3 +141,16 @@ passes a `sessionId` in the command params.
   servers you control and trust the hub to manage.
 - The agent **opens no inbound port** — no SSH exposure, no firewall hole.
 - All traffic is HTTPS. Enrollment tokens are single-use; agent keys are per-chamber.
+
+## Monitor-only agents
+
+An agent can run in **monitor** mode (`odux agent enroll --mode monitor`, or
+`odux agent mode monitor` on the chamber). It still sends heartbeats with the machine
+snapshot, but it runs no command: for each command in a heartbeat response it reports
+
+```json
+{ "status": "failed", "error": "refused: this chamber's agent runs in monitor-only mode (…)" }
+```
+
+to `POST /api/agent/command/:id/result`. The mode is stored on the chamber and is never
+sent to or set by the hub.

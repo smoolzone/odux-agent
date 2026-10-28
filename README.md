@@ -31,10 +31,35 @@ curl -fsSLO https://github.com/smoolzone/odux-agent/releases/latest/download/SHA
 openssl dgst -sha256 -verify scripts/keys/odux-release.pub -signature SHA256SUMS.sig SHA256SUMS
 ```
 
-## How it works
+## Two modes: you choose what the agent may do
 
-See [`PROTOCOL.md`](PROTOCOL.md) for the exact requests the agent makes and the
-commands it accepts (`shell`, `deploy`, `terminal`).
+| Mode | What it does |
+| --- | --- |
+| **full** (default) | Reports machine stats and runs the commands the hub sends: `shell`, `deploy`, `terminal`. |
+| **monitor** | Reports machine stats only. Every command from the hub is refused, and the hub is told why. |
+
+Pick it when you install, or change it any time on the server:
+
+```bash
+curl -fsSL https://odux.io/install-chamber | sudo sh -s -- --token en_… --hub https://odux.io --mode monitor
+sudo odux agent mode            # show the current mode
+sudo odux agent mode full       # allow commands again (takes effect on the next heartbeat)
+```
+
+The mode is stored on the server, in a root-owned file (`/etc/odux/agent.yaml`). The hub
+cannot change it: only someone with root on that machine can.
+
+## What the agent sends
+
+- **Every 5 seconds:** hostname, agent version, OS and architecture, and a machine snapshot:
+  CPU %, load average, RAM used/total, disk used/total, network totals.
+- **Only when you run something from the hub** (full mode): that command's exit code and
+  output, or the output of a terminal session you opened.
+- **Nothing else.** No files, logs, environment variables or process list. It opens no
+  port, and it only talks to your hub, over HTTPS: a plain `http://` hub address is refused
+  (except `localhost`, for development).
+
+Every request it can make is listed in [`PROTOCOL.md`](PROTOCOL.md).
 
 ## Relationship to the Odux hub
 

@@ -4,13 +4,16 @@
 #
 #   curl -fsSL https://odux.io/install-chamber | sudo sh -s -- --token en_… --hub https://odux.io
 #
+# Add `--mode monitor` for a monitor-only agent: it reports machine stats and refuses every
+# command from the hub (change later on the server with `sudo odux agent mode full`).
+#
 # Every artifact is verified against SHA256SUMS, whose signature (SHA256SUMS.sig)
 # is checked with the release public key embedded below — a compromised mirror
 # cannot deliver tampered code.
 #
 # Environment (optional):
 #   ODUX_VERSION            version to install (default: latest)
-#   ODUX_BASE_URL           base URL for artifacts (default: https://odux.io/downloads)
+#   ODUX_BASE_URL           base URL for artifacts (default: the GitHub release of smoolzone/odux-agent)
 #   ODUX_INSTALL_DIR        install directory     (default: /usr/local/bin)
 #   ODUX_ALLOW_UNSIGNED     set 1 to permit an unsigned release (NOT recommended)
 set -e
@@ -20,6 +23,7 @@ DEST="${ODUX_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${ODUX_VERSION:-latest}"
 TOKEN=""
 HUB=""
+MODE=""
 
 # Release signing public key (ECDSA P-256) — see scripts/keys/README.md.
 ODUX_PUBKEY='-----BEGIN PUBLIC KEY-----
@@ -32,6 +36,7 @@ while [ $# -gt 0 ]; do
     --token) TOKEN="$2"; shift 2 ;;
     --hub) HUB="$2"; shift 2 ;;
     --base-url) BASE_URL="$2"; shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
     *) echo "odux installer: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -41,6 +46,11 @@ if [ -z "$TOKEN" ]; then
   exit 2
 fi
 HUB="${HUB:-https://odux.io}"
+# What the agent may do: full (run the hub's commands, the default) or monitor (stats only).
+case "${MODE:-}" in
+  ""|full|monitor) : ;;
+  *) echo "odux installer: --mode must be 'full' or 'monitor'" >&2; exit 2 ;;
+esac
 
 # --- platform ---------------------------------------------------------------
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -119,7 +129,11 @@ install -m 0755 "$tmp/odux" "$bin"
 echo "odux installer: installed $bin"
 
 echo "odux installer: enrolling agent…"
-"$bin" agent enroll --token "$TOKEN" --hub "$HUB"
+if [ -n "${MODE:-}" ]; then
+  "$bin" agent enroll --token "$TOKEN" --hub "$HUB" --mode "$MODE"
+else
+  "$bin" agent enroll --token "$TOKEN" --hub "$HUB"
+fi
 
 echo "odux installer: installing the agent service…"
 "$bin" agent install
